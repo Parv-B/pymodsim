@@ -1,4 +1,4 @@
-# modbus_server.py (Corrected for pymodbus version compatibility)
+# modbus_server.py (Corrected for Context API)
 """
 Modbus TCP/IP Server Implementation for the Simulator
 
@@ -43,8 +43,6 @@ class ModbusServer:
         self._server_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         
-        # --- Multi-unit data storage ---
-        # self.slave_data[unit_id] -> {'coils': {...}, 'holding_registers': {...}, etc.}
         self.slave_data: Dict[int, Dict[str, Dict[int, Any]]] = {}
         
         self._modbus_context: Optional[ModbusServerContext] = None
@@ -61,7 +59,7 @@ class ModbusServer:
         def get_values(data_dict, default_val, padding=1000):
             if not data_dict:
                 return [default_val] * padding
-            max_addr = max(data_dict.keys())
+            max_addr = max(data_dict.keys()) if data_dict else -1
             val_list = [default_val] * (max_addr + 1)
             for addr, val in data_dict.items():
                 val_list[addr] = val
@@ -94,7 +92,9 @@ class ModbusServer:
         if self.is_running and self._modbus_context:
             new_store = self._create_store_for_unit(unit_id)
             if new_store:
-                self._modbus_context.slaves[unit_id] = new_store
+                # --- THIS IS THE CORRECTED LINE ---
+                # Use item assignment directly on the context object
+                self._modbus_context[unit_id] = new_store
                 log.info(f"Dynamically added unit {unit_id} to running server on port {self.port}")
 
     def remove_slave_unit(self, unit_id: int):
@@ -104,8 +104,10 @@ class ModbusServer:
         del self.slave_data[unit_id]
         log.info(f"Removed slave data for unit {unit_id} from server on port {self.port}")
 
-        if self.is_running and self._modbus_context and unit_id in self._modbus_context.slaves:
-            del self._modbus_context.slaves[unit_id]
+        # --- THIS IS THE CORRECTED BLOCK ---
+        # Check for existence and delete the item directly on the context object
+        if self.is_running and self._modbus_context and unit_id in self._modbus_context:
+            del self._modbus_context[unit_id]
             log.info(f"Dynamically removed unit {unit_id} from running server context.")
 
     def has_units(self) -> bool:
@@ -149,16 +151,12 @@ class ModbusServer:
             slaves_context = {uid: self._create_store_for_unit(uid) for uid in self.slave_data.keys()}
             self._modbus_context = ModbusServerContext(slaves=slaves_context, single=False)
             
-            # --- THIS IS THE CORRECTED SECTION ---
-            # Create the identity object first, then set its attributes.
-            # This is more compatible with older versions of pymodbus.
             identity = ModbusDeviceIdentification()
             identity.VendorName = 'Python Modbus Sim'
             identity.ProductCode = 'PMS'
             identity.ProductName = f'Simulated Server - Port {self.port}'
             identity.ModelName = 'Python Server'
             identity.MajorMinorRevision = '1.0'
-            # --- END OF CORRECTION ---
             
             self._server_thread = threading.Thread(target=self._run_server, args=(self._modbus_context, identity), daemon=True)
             self._server_thread.start()
