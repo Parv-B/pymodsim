@@ -1,4 +1,4 @@
-<!-- templates/index.html (Updated for Port Grouping) -->
+<!-- templates/index.html (Updated with Collapse/Expand) -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -19,8 +19,10 @@
         .btn-primary { background-color: var(--button-primary); }
         .btn-secondary { background-color: var(--button-secondary); }
         .btn-danger { background-color: var(--button-danger); }
+        .btn-collapse { padding: 5px 10px; } /* Smaller padding for collapse button */
         .server-list { display: grid; grid-template-columns: 1fr; gap: 20px; }
         .server-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 10px; margin-bottom: 15px; }
+        .server-controls { display: flex; align-items: center; gap: 15px; } /* New style for header controls */
         .status-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
         .status-running { background-color: var(--status-running); }
         .slave-unit { padding: 10px; border: 1px solid #eee; border-radius: 6px; margin-bottom: 10px; }
@@ -87,12 +89,18 @@
                 </div>
             `).join('');
 
+            // --- HTML CHANGED HERE ---
             card.innerHTML = `
                 <div class="server-header">
                     <h3>Server on Port: ${port}</h3>
-                    <span><span class="status-dot ${statusClass}"></span> ${statusText}</span>
+                    <div class="server-controls">
+                        <button class="btn-secondary btn-collapse" data-port="${port}">Collapse</button>
+                        <span><span class="status-dot ${statusClass}"></span> ${statusText}</span>
+                    </div>
                 </div>
-                <div>${unitsHTML}</div>
+                <div class="server-content" id="server-content-${port}">
+                    ${unitsHTML}
+                </div>
             `;
             serversContainer.appendChild(card);
         }
@@ -137,10 +145,19 @@
             }
         });
 
+        // --- JAVASCRIPT CLICK HANDLER UPDATED HERE ---
         serversContainer.addEventListener('click', async (e) => {
             const button = e.target;
             const { port, unitId } = button.dataset;
-            if (button.classList.contains('btn-delete')) {
+
+            if (button.classList.contains('btn-collapse')) {
+                const content = document.getElementById(`server-content-${port}`);
+                if (content) {
+                    const isCollapsed = content.style.display === 'none';
+                    content.style.display = isCollapsed ? 'block' : 'none';
+                    button.textContent = isCollapsed ? 'Collapse' : 'Expand';
+                }
+            } else if (button.classList.contains('btn-delete')) {
                 if (confirm(`Delete Unit ${unitId} on Port ${port}?`)) {
                     await fetch(`${API_BASE}/slaves/${port}/${unitId}`, { method: 'DELETE' });
                     loadSlaves();
