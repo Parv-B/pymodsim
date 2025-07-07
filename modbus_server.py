@@ -1,4 +1,4 @@
-# modbus_server.py (Refactored for Multi-Unit Support)
+# modbus_server.py (Corrected for pymodbus version compatibility)
 """
 Modbus TCP/IP Server Implementation for the Simulator
 
@@ -149,11 +149,16 @@ class ModbusServer:
             slaves_context = {uid: self._create_store_for_unit(uid) for uid in self.slave_data.keys()}
             self._modbus_context = ModbusServerContext(slaves=slaves_context, single=False)
             
-            identity = ModbusDeviceIdentification(
-                VendorName='Python Modbus Sim', ProductCode='PMS',
-                ProductName=f'Simulated Server - Port {self.port}',
-                ModelName='Python Server', MajorMinorRevision='1.0'
-            )
+            # --- THIS IS THE CORRECTED SECTION ---
+            # Create the identity object first, then set its attributes.
+            # This is more compatible with older versions of pymodbus.
+            identity = ModbusDeviceIdentification()
+            identity.VendorName = 'Python Modbus Sim'
+            identity.ProductCode = 'PMS'
+            identity.ProductName = f'Simulated Server - Port {self.port}'
+            identity.ModelName = 'Python Server'
+            identity.MajorMinorRevision = '1.0'
+            # --- END OF CORRECTION ---
             
             self._server_thread = threading.Thread(target=self._run_server, args=(self._modbus_context, identity), daemon=True)
             self._server_thread.start()
