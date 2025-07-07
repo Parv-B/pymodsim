@@ -1,9 +1,10 @@
-# modbus_server.py (Refactored for Multiple Unit IDs)
+# modbus_server.py (Corrected Version)
 """
 Modbus TCP/IP Server Implementation for the Simulator
 
-This module provides a Modbus TCP server that can manage multiple slave units
-(Unit IDs) on a single TCP port.
+This module provides a Modbus TCP slave simulation with configurable data points
+and support for common function codes. It's designed to run in a separate
+thread and be managed by a parent application.
 """
 
 import logging
@@ -12,6 +13,7 @@ import time
 import asyncio
 from typing import Dict, Any, Optional
 
+# Check for pymodbus and handle potential import errors
 try:
     from pymodbus.server import StartAsyncTcpServer
     from pymodbus.device import ModbusDeviceIdentification
@@ -27,93 +29,66 @@ log = logging.getLogger(__name__)
 
 class ModbusServer:
     """
-    Manages a Modbus TCP/IP server on a single port, capable of hosting
-    multiple slave units (Unit IDs).
+    Manages a single Modbus TCP/IP slave instance.
+    
+    This class handles the startup, shutdown, and data management for one
+    Modbus slave, designed to run in its own thread.
     """
     
-    def __init__(self, port: int = 502):
+    def __init__(self, unit_id: int = 1, port: int = 502, name: str = "Modbus Slave"):
         if not PYMODBUS_AVAILABLE:
             raise RuntimeError("Pymodbus library is not available.")
 
+        self.unit_id = unit_id
         self.port = port
+        self.name = name
         self.is_running = False
         
-        # Manages the server thread and asyncio loop
+        # Threading and asyncio event loop management
         self._server_thread: Optional[threading.Thread] = None
+        self._server_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         
-        # This will hold the data for each slave unit, keyed by unit_id
-        self.slave_data: Dict[int, Dict[str, Dict]] = {}
-
-        # The main pymodbus server context holding all slave contexts
+        # Internal data storage (the "source of truth" for the UI)
+        self.coils: Dict[int, bool] = {i: (i % 2 == 0) for i in range(10)}
+        self.discrete_inputs: Dict[int, bool] = {i: (i % 2 != 0) for i in range(10)}
+        self.holding_registers: Dict[int, int] = {i: i * 10 for i in range(10)}
+        self.input_registers: Dict[int, int] = {i: i * 100 for i in range(10)}
+        
+        # Pymodbus data context for the actual server
         self._modbus_context: Optional[ModbusServerContext] = None
         
+        # Sync monitoring for external changes
         self._sync_thread: Optional[threading.Thread] = None
         self._sync_active = False
 
-    def add_slave_unit(self, unit_id: int):
-        """Adds a new slave unit (device) to this server instance."""
-        if unit_id in self.slave_data:
-            log.warning(f"Unit ID {unit_id} already exists on port {self.port}")
-            return
-
-        # Create default data stores for the new unit
-        self.slave_data[unit_id] = {
-            'coils': {i: (i % 2 == 0) for i in range(10)},
-            'discrete_inputs': {i: (i % 2 != 0) for i in range(10)},
-            'holding_registers': {i: i * 10 for i in range(10)},
-            'input_registers': {i: i * 100 for i in range(10)}
-        }
-        
-        # If the server is already running, we need to dynamically add the new slave context
-        if self.is_running and self._modbus_context:
-            store = self._create_datastore_for_unit(unit_id)
-            self._modbus_context.slaves[unit_id] = store
-        
-        log.info(f"Prepared Unit ID {unit_id} for port {self.port}")
-
-    def remove_slave_unit(self, unit_id: int):
-        """Removes a slave unit from this server."""
-        if unit_id not in self.slave_data:
-            return
-        
-        del self.slave_data[unit_id]
-        if self.is_running and self._modbus_context and unit_id in self._modbus_context.slaves:
-            del self._modbus_context.slaves[unit_id]
-        
-        log.info(f"Removed Unit ID {unit_id} from port {self.port}")
-    
-    def has_units(self) -> bool:
-        """Checks if the server has any slave units left."""
-        return bool(self.slave_data)
-
-    def _create_datastore_for_unit(self, unit_id: int) -> ModbusSlaveContext:
-        """Creates a Pymodbus datastore from our internal data dict for a given unit."""
-        data = self.slave_data[unit_id]
-        return ModbusSlaveContext(
-            di=ModbusSequentialDataBlock(0, [v for k, v in sorted(data['discrete_inputs'].items())] + [False]*1000),
-            co=ModbusSequentialDataBlock(0, [v for k, v in sorted(data['coils'].items())] + [False]*1000),
-            hr=ModbusSequentialDataBlock(0, [v for k, v in sorted(data['holding_registers'].items())] + [0]*1000),
-            ir=ModbusSequentialDataBlock(0, [v for k, v in sorted(data['input_registers'].items())] + [0]*1000),
-        )
-
     def start(self) -> bool:
         if self.is_running:
+            log.warning(f"Modbus slave '{self.name}' is already running.")
             return False
-        
+            
         try:
-            # Build the server context from all configured slave units
-            slave_contexts = {
-                unit_id: self._create_datastore_for_unit(unit_id) 
-                for unit_id in self.slave_data
-            }
-            self._modbus_context = ModbusServerContext(slaves=slave_contexts, single=False)
+            # Initialize Modbus datastore with a large enough default size
+            # This is where the Modbus master will read/write data.
+            store = ModbusSlaveContext(
+                di=ModbusSequentialDataBlock(0, [v for k, v in sorted(self.discrete_inputs.items())] + [False]*1000),
+                co=ModbusSequentialDataBlock(0, [v for k, v in sorted(self.coils.items())] + [False]*1000),
+                hr=ModbusSequentialDataBlock(0, [v for k, v in sorted(self.holding_registers.items())] + [0]*1000),
+                ir=ModbusSequentialDataBlock(0, [v for k, v in sorted(self.input_registers.items())] + [0]*1000),
+            )
+            self._modbus_context = ModbusServerContext(slaves={self.unit_id: store}, single=False)
             
+            # --- THIS IS THE CORRECTED SECTION ---
+            # Device identification, created in a way that is compatible with older pymodbus versions
             identity = ModbusDeviceIdentification()
-            identity.VendorName = 'Python Modbus Gateway'
-            identity.ProductCode = 'PMG'
-            identity.ProductName = f'Simulated Gateway on Port {self.port}'
+            identity.VendorName = 'Python Modbus Sim'
+            identity.ProductCode = 'PMS'
+            identity.ProductName = f'Simulated Slave - {self.name}'
+            identity.ModelName = 'Python Slave'
+            identity.MajorMinorRevision = '1.0'
+            # --- END OF CORRECTION ---
             
+            # Run the server in a separate thread
             self._server_thread = threading.Thread(
                 target=self._run_server,
                 args=(self._modbus_context, identity),
@@ -121,128 +96,162 @@ class ModbusServer:
             )
             self._server_thread.start()
             
+            # Allow a moment for the server thread to initialize
             time.sleep(0.5)
+            
             if not self.is_running:
-                 raise RuntimeError("Server thread failed to start.")
+                 raise RuntimeError("Server thread failed to start the event loop.")
 
+            # Start the sync monitoring thread
             self._sync_active = True
             self._sync_thread = threading.Thread(target=self._sync_monitoring_loop, daemon=True)
             self._sync_thread.start()
             
-            log.info(f"Modbus server started successfully on port {self.port}")
+            log.info(f"Modbus slave '{self.name}' started successfully on port {self.port}")
             return True
             
         except Exception as e:
-            log.error(f"Failed to start Modbus server on port {self.port}: {e}", exc_info=True)
+            log.error(f"Failed to start Modbus slave '{self.name}': {e}", exc_info=True)
             self.is_running = False
             return False
-
+    
     def _run_server(self, context, identity):
-        """The target method for the server thread."""
+        """The target method for the server thread. Runs the asyncio event loop."""
         try:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
+
+            # Create the server coroutine
             server_coro = StartAsyncTcpServer(
                 context=context,
                 identity=identity,
                 address=("0.0.0.0", self.port)
             )
+
+            # Schedule the server to run
+            self._server_task = self._loop.create_task(server_coro)
             self.is_running = True
-            log.info(f"Asyncio event loop starting for server on port {self.port}.")
-            self._loop.run_until_complete(server_coro)
+            log.info(f"Asyncio event loop starting for slave '{self.name}'.")
+            self._loop.run_forever()
+
         except Exception as e:
-            log.error(f"Modbus server on port {self.port} thread error: {e}", exc_info=True)
+            # Port in use is a common error here
+            log.error(f"Modbus slave '{self.name}' server thread error: {e}", exc_info=True)
         finally:
+            if self._loop and self._loop.is_running():
+                self._loop.stop()
             self.is_running = False
-            log.info(f"Asyncio event loop stopped for server on port {self.port}.")
+            log.info(f"Asyncio event loop stopped for slave '{self.name}'.")
 
     def stop(self) -> bool:
-        # Same stop logic as before
-        if not self.is_running: return False
+        if not self.is_running:
+            log.warning(f"Modbus slave '{self.name}' is not running.")
+            return False
+            
         try:
+            # Stop sync monitoring first
             self._sync_active = False
             if self._sync_thread and self._sync_thread.is_alive():
                 self._sync_thread.join(timeout=1.0)
+
+            # Gracefully stop the asyncio event loop from another thread
             if self._loop and self._loop.is_running():
+                log.info(f"Requesting event loop stop for slave '{self.name}'...")
                 self._loop.call_soon_threadsafe(self._loop.stop)
+            
             if self._server_thread and self._server_thread.is_alive():
                 self._server_thread.join(timeout=2.0)
+
             self.is_running = False
-            log.info(f"Modbus server on port {self.port} stopped.")
+            log.info(f"Modbus slave '{self.name}' stopped.")
             return True
-        except Exception as e:
-            log.error(f"Error stopping Modbus server on port {self.port}: {e}", exc_info=True)
-            return False
-
-    def _update_modbus_datastore(self, unit_id: int, data_type: str, address: int, value: Any):
-        """Syncs a single value to the pymodbus datastore for a specific unit."""
-        if not self._modbus_context or not self.is_running: return
-        
-        # Get the context for the specific slave unit
-        if unit_id not in self._modbus_context.slaves: return
-        slave_context = self._modbus_context.slaves[unit_id]
-        
-        try:
-            fc_map = {'coil': 1, 'discrete_input': 2, 'holding_register': 3, 'input_register': 4}
-            val_map = {'coil': bool(value), 'discrete_input': bool(value), 'holding_register': int(value), 'input_register': int(value)}
-            slave_context.setValues(fc_map[data_type], address, [val_map[data_type]])
-        except Exception as e:
-            log.error(f"Failed to sync to datastore for unit {unit_id} on port {self.port}: {e}")
-
-    def _sync_monitoring_loop(self):
-        """Checks for external changes for all managed units."""
-        log.info(f"Sync monitoring started for server on port {self.port}.")
-        while self._sync_active and self.is_running:
-            time.sleep(0.5)
-            if not self._modbus_context: continue
             
-            for unit_id, data_stores in self.slave_data.items():
-                if unit_id not in self._modbus_context.slaves: continue
-                slave_context = self._modbus_context.slaves[unit_id]
-                try:
+        except Exception as e:
+            log.error(f"Error stopping Modbus slave '{self.name}': {e}", exc_info=True)
+            return False
+    
+    def _update_modbus_datastore(self, data_type: str, address: int, value: Any):
+        """Syncs a single value from our internal dict to the pymodbus datastore."""
+        if not self._modbus_context or not self.is_running:
+            return
+        
+        slave_context = self._modbus_context[self.unit_id]
+        try:
+            log.debug(f"Syncing to datastore: {data_type} @ {address} = {value}")
+            if data_type == 'coil':
+                slave_context.setValues(1, address, [bool(value)])
+            elif data_type == 'discrete_input':
+                slave_context.setValues(2, address, [bool(value)])
+            elif data_type == 'holding_register':
+                slave_context.setValues(3, address, [int(value)])
+            elif data_type == 'input_register':
+                slave_context.setValues(4, address, [int(value)])
+        except Exception as e:
+            log.error(f"Failed to sync to datastore for slave '{self.name}': {e}")
+    
+    def _sync_monitoring_loop(self):
+        """
+        Periodically checks the pymodbus datastore for changes made by external
+        clients and updates our internal dictionaries to reflect them.
+        """
+        log.info(f"Sync monitoring started for slave '{self.name}'.")
+        while self._sync_active and self.is_running:
+            try:
+                if self._modbus_context:
+                    slave_context = self._modbus_context[self.unit_id]
                     # Check Holding Registers
-                    for addr, val in data_stores['holding_registers'].items():
+                    for addr, val in self.holding_registers.items():
                         new_val = slave_context.getValues(3, addr, 1)[0]
                         if new_val != val:
-                            log.info(f"External write on port {self.port}, unit {unit_id}: HR {addr} changed to {new_val}")
-                            data_stores['holding_registers'][addr] = new_val
+                            log.info(f"Detected external write on slave '{self.name}': HR {addr} changed from {val} to {new_val}")
+                            self.holding_registers[addr] = new_val
                     # Check Coils
-                    for addr, val in data_stores['coils'].items():
+                    for addr, val in self.coils.items():
                         new_val = slave_context.getValues(1, addr, 1)[0]
                         if new_val != val:
-                            log.info(f"External write on port {self.port}, unit {unit_id}: Coil {addr} changed to {new_val}")
-                            data_stores['coils'][addr] = new_val
-                except Exception as e:
-                    log.error(f"Error in sync loop for unit {unit_id}: {e}")
-        log.info(f"Sync monitoring stopped for server on port {self.port}.")
+                            log.info(f"Detected external write on slave '{self.name}': Coil {addr} changed from {val} to {new_val}")
+                            self.coils[addr] = new_val
+                
+                time.sleep(0.5)  # Check for changes twice per second
+            except Exception as e:
+                log.error(f"Error in sync monitoring loop for '{self.name}': {e}", exc_info=True)
+                time.sleep(2.0) # Wait longer on error
+        log.info(f"Sync monitoring stopped for slave '{self.name}'.")
 
-    # --- Public Data Methods now require unit_id ---
+    # --- Public Methods for Data Manipulation ---
+
+    def add_coil(self, address: int, value: bool = False):
+        self.coils[address] = value
+        self._update_modbus_datastore('coil', address, value)
     
-    def set_data_point(self, unit_id: int, data_type: str, address: int, value: Any):
-        if unit_id not in self.slave_data: return
-        
-        internal_store = self.slave_data[unit_id][f"{data_type}s"]
-        
-        if data_type in ['holding_register', 'input_register']:
-            value = max(0, min(65535, int(value)))
-        else:
-            value = bool(value)
+    def add_discrete_input(self, address: int, value: bool = False):
+        self.discrete_inputs[address] = value
+        self._update_modbus_datastore('discrete_input', address, value)
 
-        internal_store[address] = value
-        self._update_modbus_datastore(unit_id, data_type, address, value)
+    def add_holding_register(self, address: int, value: int = 0):
+        value = max(0, min(65535, value)) # Ensure 16-bit
+        self.holding_registers[address] = value
+        self._update_modbus_datastore('holding_register', address, value)
+
+    def add_input_register(self, address: int, value: int = 0):
+        value = max(0, min(65535, value)) # Ensure 16-bit
+        self.input_registers[address] = value
+        self._update_modbus_datastore('input_register', address, value)
 
     def get_status(self) -> Dict[str, Any]:
-        """Returns status for the whole server and a list of its units."""
+        """Returns a dictionary with the slave's current configuration and status."""
         return {
+            'name': self.name,
+            'unit_id': self.unit_id,
             'port': self.port,
             'is_running': self.is_running,
-            'units': list(self.slave_data.keys())
         }
-    
-    def get_all_data_for_unit(self, unit_id: int) -> Optional[Dict[str, Dict[int, Any]]]:
-        if unit_id not in self.slave_data:
-            return None
-        # Return a copy to prevent direct modification
+
+    def get_all_data(self) -> Dict[str, Dict[int, Any]]:
+        """Returns all current data points from internal storage."""
         return {
-            k: v.copy() for k, v in self.slave_data[unit_id].items()
+            'coils': self.coils.copy(),
+            'discrete_inputs': self.discrete_inputs.copy(),
+            'holding_registers': self.holding_registers.copy(),
+            'input_registers': self.input_registers.copy()
         }
