@@ -110,6 +110,19 @@ class ModbusServer:
             del self._modbus_context[unit_id]
             log.info(f"Dynamically removed unit {unit_id} from running server context.")
 
+    async def _async_update_slave_block(self, unit_id: int, block_name: str, new_block: ModbusSequentialDataBlock):
+        """
+        Asynchronously updates a specific data block within a slave context.
+        Must be called from the asyncio event loop thread.
+        """
+        if not self._modbus_context or unit_id not in self._modbus_context:
+            log.error(f"Cannot update block: Modbus context or unit {unit_id} not found.")
+            return
+
+        slave_context = self._modbus_context[unit_id]
+        setattr(slave_context, block_name, new_block)
+        log.debug(f"Asyncio: Updated slave block '{block_name}' for unit {unit_id}.")
+
     def has_units(self) -> bool:
         """Checks if the server has any slave units configured."""
         return bool(self.slave_data)
@@ -137,6 +150,54 @@ class ModbusServer:
 
         sanitized_value = bool(value) if data_key in ['coils', 'discrete_inputs'] else max(0, min(65535, int(value)))
         unit_data[data_key][address] = sanitized_value
+        
+        if self._modbus_context and self.is_running and unit_id in self._modbus_context:
+            slave_context = self._modbus_context[unit_id]
+            block_attr_name = {
+                'coil': 'co', 'discrete_input': 'di',
+                'holding_register': 'hr', 'input_register': 'ir'
+            }[data_type]
+            
+            current_block = getattr(slave_context, block_attr_name)
+            
+            # Check if the address is beyond the current block's size
+            # ModbusSequentialDataBlock's 'count' is its length/size
+            if address >= current_block.count:
+                log.debug(f"Address {address} is out of bounds for current {data_type} block (size: {current_block.count}). Recreating block.")
+                
+                # Get current values up to current block size
+                existing_block_values = current_block.getValues(0, current_block.count)
+                
+                # Determine default value for padding
+                default_val = False if data_key in ['coils', 'discrete_inputs'] else 0
+                
+                # Calculate new size needed, including the new address
+                new_size = address + 1
+                
+                # Pad existing values to the new size with default values
+                padded_values = existing_block_values + [default_val] * (new_size - len(existing_block_values))
+                
+                # Create the new block instance
+                new_block = ModbusSequentialDataBlock(0, padded_values)
+                
+                # Schedule the update on the asyncio loop
+                if self._loop and self._loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(
+                        self._async_update_slave_block(unit_id, block_attr_name, new_block),
+                        self._loop
+                    )
+                    try:
+                        future.result(timeout=1.0) # Wait for it to complete
+                        log.info(f"Dynamically expanded {data_type} block for unit {unit_id} to size {new_block.count}.")
+                    except asyncio.TimeoutError:
+                        log.error(f"Timeout updating {data_type} block for unit {unit_id}. Server might not reflect changes immediately.")
+                    except Exception as e:
+                        log.error(f"Error updating {data_type} block for unit {unit_id} on asyncio loop: {e}", exc_info=True)
+                else:
+                    log.warning(f"Asyncio loop not running, cannot dynamically expand {data_type} block for unit {unit_id}.")
+        # --- End new logic ---
+
+        # Now, sync the specific value to the (potentially expanded) pymodbus datastore
         self._update_modbus_datastore(unit_id, data_type, address, sanitized_value)
     
     # --- Core Server Logic ---
